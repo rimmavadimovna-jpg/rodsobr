@@ -1,0 +1,13 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.venv/
+venv/
+.env
+
+# Банк генерируется из семени (build_bank); в репозиторий не коммитим
+letovo_bot/data/bank.sqlite
+
+# Артефакты выверки
+for_manual_review*.csv
