@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import sqlite3
+from html import escape as _esc
 
 from aiogram import F, Router
 from aiogram.filters import Command, CommandStart
@@ -52,42 +53,48 @@ def save_attempt(conn: sqlite3.Connection, chat_id: int, task: Task, v: Verdict,
 # Рендеринг
 # --------------------------------------------------------------------------- #
 def render_task(task: Task, idx: int, total: int) -> str:
+    """Текст задания для Telegram. Весь динамический материал из банка
+    экранируется (_esc), чтобы символы < > & в данных не ломали HTML-разметку."""
     p = task.payload
-    head = f"<b>Задание {idx + 1}/{total}</b> (тип {int(task.task_type)}, тема: {task.topic})\n"
-    body = p.get("instruction", "")
+    head = (f"<b>Задание {idx + 1}/{total}</b> "
+            f"(тип {int(task.task_type)}, тема: {_esc(task.topic)})\n")
+    body = _esc(p.get("instruction", ""))
     tt = TaskType(task.task_type)
     if tt == TaskType.THIRD_EXTRA:
-        rows = "\n".join(f"{i + 1}) " + ", ".join(r["words"]) + f"  — {r['principle']}"
+        rows = "\n".join(f"{i + 1}) " + ", ".join(_esc(w) for w in r["words"])
+                         + f"  — {_esc(r['principle'])}"
                          for i, r in enumerate(p["rows"]))
         body += "\n\n" + rows + "\n\n<i>Ответ: по одному слову на строку, в верном написании.</i>"
     elif tt == TaskType.CONJUGATION:
-        body += "\n\n" + ", ".join(p["forms"])
+        body += "\n\n" + ", ".join(_esc(f) for f in p["forms"])
     elif tt == TaskType.SCHEMES:
-        body += "\n\n" + "\n".join(f"{i + 1}) {s}" for i, s in enumerate(p["sentences"]))
+        body += "\n\n" + "\n".join(f"{i + 1}) {_esc(s)}" for i, s in enumerate(p["sentences"]))
         body += "\n\n<i>Схемы — по одной на строку.</i>"
     elif tt == TaskType.PUNCTUATION:
-        body += "\n\n" + "\n".join(f"{i + 1}) {s}" for i, s in enumerate(p["sentences"]))
+        body += "\n\n" + "\n".join(f"{i + 1}) {_esc(s)}" for i, s in enumerate(p["sentences"]))
     elif tt == TaskType.CONSTRUCT:
-        words = "\n".join(f"• {w['word']} — {w['meaning']}" for w in p["words"])
-        phr = "\n".join(f"• {x['phraseme']} — {x['meaning']}" for x in p["phrasemes"])
+        words = "\n".join(f"• {_esc(w['word'])} — {_esc(w['meaning'])}" for w in p["words"])
+        phr = "\n".join(f"• {_esc(x['phraseme'])} — {_esc(x['meaning'])}" for x in p["phrasemes"])
         body += f"\n\nСлова:\n{words}\n\nФразеологизмы:\n{phr}"
     elif tt == TaskType.GRAMMAR_FIX:
-        body += "\n\n" + "\n".join(f"{i + 1}) {s}" for i, s in enumerate(p["sentences"]))
+        body += "\n\n" + "\n".join(f"{i + 1}) {_esc(s)}" for i, s in enumerate(p["sentences"]))
         body += "\n\n<i>Отметьте ошибочные кнопками, затем пришлите исправленные варианты текстом.</i>"
     elif tt == TaskType.PHONETICS:
-        body += f"\n\nПредложение: «{p['sentence']}»\nЗвук: {p['sound']}"
+        body += f"\n\nПредложение: «{_esc(p['sentence'])}»\nЗвук: {_esc(p['sound'])}"
     elif tt == TaskType.SYNONYMS:
-        body += f"\n\nКонтекст: «{p['context']}»\n<i>5 синонимов через запятую.</i>"
+        body += f"\n\nКонтекст: «{_esc(p['context'])}»\n<i>5 синонимов через запятую.</i>"
     elif tt == TaskType.WORD_FORMATION:
-        body += "\n\nСлова: " + ", ".join(p["words"]) + f"\nРазобрать: «{p['target_word']}»"
+        body += "\n\nСлова: " + ", ".join(_esc(w) for w in p["words"]) \
+            + f"\nРазобрать: «{_esc(p['target_word'])}»"
     elif tt == TaskType.FOURTH_EXTRA:
-        rows = "\n".join(f"{i + 1}) " + ", ".join(r["words"]) for i, r in enumerate(p["rows"]))
+        rows = "\n".join(f"{i + 1}) " + ", ".join(_esc(w) for w in r["words"])
+                         for i, r in enumerate(p["rows"]))
         body += "\n\n" + rows + "\n\n<i>По одному лишнему слову на строку.</i>"
     elif tt == TaskType.TEXT_STATEMENTS:
-        st = "\n".join(f"{i + 1}) {s}" for i, s in enumerate(p["statements"]))
-        body += f"\n\n{p['text']}\n\nУтверждения:\n{st}"
+        st = "\n".join(f"{i + 1}) {_esc(s)}" for i, s in enumerate(p["statements"]))
+        body += f"\n\n{_esc(p['text'])}\n\nУтверждения:\n{st}"
     elif tt == TaskType.PHRASEME:
-        body += f"\n\n{p['text']}\n\nАбзац № {p['paragraph']}."
+        body += f"\n\n{_esc(p['text'])}\n\nАбзац № {p['paragraph']}."
     return head + body
 
 
@@ -110,15 +117,15 @@ def numbers_keyboard(task: Task, selected: set[int]) -> InlineKeyboardMarkup:
 
 
 def render_verdict(v: Verdict) -> str:
-    lines = [v.summary_line()]
+    lines = [_esc(v.summary_line())]
     for c in v.criteria:
         icon = "✓" if c.passed else "✗"
-        detail = f" — {c.detail}" if c.detail else ""
-        lines.append(f"  {icon} {c.name}{detail}")
+        detail = f" — {_esc(c.detail)}" if c.detail else ""
+        lines.append(f"  {icon} {_esc(c.name)}{detail}")
     if v.reference_answer:
-        lines.append(f"\n<b>Образец:</b>\n{v.reference_answer}")
+        lines.append(f"\n<b>Образец:</b>\n{_esc(v.reference_answer)}")
     if v.rule_source:
-        lines.append(f"\n📖 Правило: {v.rule_source}")
+        lines.append(f"\n📖 Правило: {_esc(v.rule_source)}")
     if v.needs_review:
         lines.append("\n<i>Часть ответа отправлена на ручную проверку преподавателю.</i>")
     return "\n".join(lines)
@@ -136,7 +143,8 @@ async def cmd_start(message: Message) -> None:
         "Привет! Я бот для подготовки к вступительному тесту Летово (7 класс).\n"
         f"Каждый день в {config.DEFAULT_DAILY_TIME} ({config.DEFAULT_TIMEZONE}) я буду присылать "
         "набор заданий на 15–20 минут и сразу проверять их.\n\n"
-        "Команды: /today — задания сейчас, /stats — прогресс, /theory <тема>, /settings."
+        "Команды: /today — задания сейчас, /stats — прогресс, "
+        "/theory «тема», /settings."
     )
 
 
@@ -157,7 +165,7 @@ async def cmd_stats(message: Message) -> None:
         return
     lines = ["<b>Прогресс по темам</b> (от слабых к сильным):"]
     for r in rows:
-        lines.append(f"• {r['topic']}: {r['avg']:.0%} (попыток: {r['n']})")
+        lines.append(f"• {_esc(r['topic'])}: {r['avg']:.0%} (попыток: {r['n']})")
     await message.answer("\n".join(lines))
 
 
@@ -176,7 +184,7 @@ async def cmd_theory(message: Message) -> None:
         return
     lines = ["<b>Правила и источники</b>:"]
     for r in rows:
-        lines.append(f"• {r['topic']}: {r['source']}")
+        lines.append(f"• {_esc(r['topic'])}: {_esc(r['source'])}")
     await message.answer("\n".join(lines))
 
 
