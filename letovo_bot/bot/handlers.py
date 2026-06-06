@@ -24,6 +24,15 @@ router = Router()
 store = SessionStore()
 _judge = LLMJudge() if config.ENABLE_LLM_JUDGE else None
 
+# Ссылка на планировщик (устанавливается из main.py), чтобы /settings
+# перепланировал рассылку немедленно, без перезапуска бота.
+_scheduler = None
+
+
+def set_scheduler(scheduler) -> None:
+    global _scheduler
+    _scheduler = scheduler
+
 
 def _conn() -> sqlite3.Connection:
     return db.connect(config.BANK_PATH)
@@ -56,6 +65,16 @@ def render_task(task: Task, idx: int, total: int) -> str:
     """Текст задания для Telegram. Весь динамический материал из банка
     экранируется (_esc), чтобы символы < > & в данных не ломали HTML-разметку."""
     p = task.payload
+    if int(task.task_type) == int(TaskType.QUIZ):
+        head = f"<b>Вопрос {idx + 1}/{total}</b>  ({_esc(task.topic)})\n\n"
+        body = _esc(p.get("stem", ""))
+        opts = p.get("options") or []
+        if opts:
+            body += "\n\n" + "\n".join(f"  {i + 1}) {_esc(o)}" for i, o in enumerate(opts))
+            body += "\n\n<i>Выберите вариант кнопкой ниже.</i>"
+        else:
+            body += "\n\n<i>Напишите ответ одним словом.</i>"
+        return head + body
     head = (f"<b>Задание {idx + 1}/{total}</b> "
             f"(тип {int(task.task_type)}, тема: {_esc(task.topic)})\n")
     body = _esc(p.get("instruction", ""))
@@ -116,6 +135,14 @@ def numbers_keyboard(task: Task, selected: set[int]) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
+def quiz_keyboard(task: Task) -> InlineKeyboardMarkup:
+    """Кнопки одиночного выбора для теста (нажатие сразу отправляет ответ)."""
+    opts = task.payload.get("options") or []
+    rows = [[InlineKeyboardButton(text=str(i + 1), callback_data=f"qz:{task.id}:{i + 1}")]
+            for i in range(len(opts))]
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
 def render_verdict(v: Verdict) -> str:
     lines = [_esc(v.summary_line())]
     for c in v.criteria:
@@ -140,11 +167,12 @@ async def cmd_start(message: Message) -> None:
     ensure_user(conn, message.chat.id, message.from_user.full_name if message.from_user else "")
     conn.close()
     await message.answer(
-        "Привет! Я бот для подготовки к вступительному тесту Летово (7 класс).\n"
-        f"Каждый день в {config.DEFAULT_DAILY_TIME} ({config.DEFAULT_TIMEZONE}) я буду присылать "
-        "набор заданий на 15–20 минут и сразу проверять их.\n\n"
-        "Команды: /today — задания сейчас, /stats — прогресс, "
-        "/theory «тема», /settings."
+        "Привет! Я тренажёр по русскому языку — курс из 15 дней.\n"
+        f"Каждый день в {config.DEFAULT_DAILY_TIME} ({config.DEFAULT_TIMEZONE}) я присылаю "
+        "набор из 9 вопросов (по 1 из тем 1–3 и по 2 из тем 4–6) и сразу проверяю их "
+        "с объяснением.\n\n"
+        "Команды: /today — вопросы сейчас, /stats — прогресс, "
+        "/theory «тема», /restart — начать курс заново, /settings."
     )
 
 
@@ -188,18 +216,31 @@ async def cmd_theory(message: Message) -> None:
     await message.answer("\n".join(lines))
 
 
+def _reschedule(conn: sqlite3.Connection, chat_id: int) -> None:
+    """Перепланировать ежедневную рассылку пользователю по текущим настройкам."""
+    if _scheduler is None:
+        return
+    row = conn.execute("SELECT timezone, daily_time FROM users WHERE chat_id=?",
+                       (chat_id,)).fetchone()
+    if row:
+        _scheduler.schedule_user(chat_id, row["timezone"], row["daily_time"])
+
+
 @router.message(Command("settings"))
 async def cmd_settings(message: Message) -> None:
     parts = (message.text or "").split()
     conn = _conn()
+    ensure_user(conn, message.chat.id, "")
     if len(parts) >= 3 and parts[1] == "time":
         conn.execute("UPDATE users SET daily_time=? WHERE chat_id=?", (parts[2], message.chat.id))
         conn.commit()
-        await message.answer(f"Время рассылки обновлено: {parts[2]}")
+        _reschedule(conn, message.chat.id)
+        await message.answer(f"Время рассылки обновлено: {parts[2]} (применено сразу).")
     elif len(parts) >= 3 and parts[1] == "tz":
         conn.execute("UPDATE users SET timezone=? WHERE chat_id=?", (parts[2], message.chat.id))
         conn.commit()
-        await message.answer(f"Часовой пояс обновлён: {parts[2]}")
+        _reschedule(conn, message.chat.id)
+        await message.answer(f"Часовой пояс обновлён: {parts[2]} (применено сразу).")
     else:
         row = conn.execute("SELECT timezone, daily_time FROM users WHERE chat_id=?",
                            (message.chat.id,)).fetchone()
@@ -207,7 +248,7 @@ async def cmd_settings(message: Message) -> None:
         tm = row["daily_time"] if row else config.DEFAULT_DAILY_TIME
         await message.answer(
             f"Часовой пояс: {tz}\nВремя рассылки: {tm}\n\n"
-            "Изменить: <code>/settings time 18:30</code> или <code>/settings tz Europe/Podgorica</code>")
+            "Изменить: <code>/settings time 10:00</code> или <code>/settings tz Europe/Moscow</code>")
     conn.close()
 
 
@@ -217,13 +258,22 @@ async def cmd_settings(message: Message) -> None:
 async def send_daily(chat_id: int, bot) -> None:
     conn = _conn()
     ensure_user(conn, chat_id, "")
-    tasks = assembler.build_daily_set(conn, chat_id)
+    # если набор уже идёт и не завершён — не начинаем новый день, продолжаем
+    active = store.get(chat_id)
+    if active is not None and not active.finished:
+        conn.close()
+        await _send_current(chat_id, bot)
+        return
+    day = assembler.get_course_day(conn, chat_id)        # 0-based
+    tasks = assembler.build_course_today(conn, chat_id)
     conn.close()
     if not tasks:
-        await bot.send_message(chat_id, "Сегодня заданий нет — банк пуст или всё пройдено.")
+        await bot.send_message(
+            chat_id, "🎓 Курс из 15 дней пройден! Можно начать заново — напишите /restart.")
         return
     store.start(chat_id, tasks)
-    await bot.send_message(chat_id, f"📚 Набор на сегодня: {len(tasks)} заданий. Поехали!")
+    await bot.send_message(
+        chat_id, f"📚 День {day + 1} из {assembler.COURSE_DAYS}: {len(tasks)} вопросов. Поехали!")
     await _send_current(chat_id, bot)
 
 
@@ -234,7 +284,9 @@ async def _send_current(chat_id: int, bot) -> None:
         return
     task = s.current
     text = render_task(task, s.index, len(s.tasks))
-    if task.task_type in MULTI_NUMBER_TYPES:
+    if int(task.task_type) == int(TaskType.QUIZ) and (task.payload.get("options")):
+        await bot.send_message(chat_id, text, reply_markup=quiz_keyboard(task), parse_mode="HTML")
+    elif task.task_type in MULTI_NUMBER_TYPES:
         kb = numbers_keyboard(task, s.selected_numbers.get(task.id, set()))
         await bot.send_message(chat_id, text, reply_markup=kb, parse_mode="HTML")
     else:
@@ -246,14 +298,13 @@ async def _finish_day(chat_id: int, bot) -> None:
     if s and s.day_scores:
         avg = sum(s.day_scores) / len(s.day_scores)
         conn = _conn()
-        weak = conn.execute(
-            "SELECT topic, AVG(score) a FROM attempts WHERE chat_id=? GROUP BY topic "
-            "ORDER BY a ASC LIMIT 3", (chat_id,)).fetchall()
+        assembler.advance_course_day(conn, chat_id)       # переходим к следующему дню курса
+        new_day = assembler.get_course_day(conn, chat_id)
         conn.close()
-        weak_str = ", ".join(r["topic"] for r in weak) or "—"
+        tail = ("Это был последний день курса! 🎓" if new_day >= assembler.COURSE_DAYS
+                else "Возвращайтесь завтра за следующим набором — или сразу /today.")
         await bot.send_message(
-            chat_id,
-            f"🏁 Итог дня: {avg:.0%}. Стоит подтянуть: {weak_str}.\nДо завтра! /stats — прогресс.")
+            chat_id, f"🏁 Итог дня: {avg:.0%} верных. {tail}\n/stats — прогресс по темам.")
     store.clear(chat_id)
 
 
@@ -281,6 +332,33 @@ async def on_done(cb: CallbackQuery) -> None:
     answer = ",".join(str(x) for x in selected)
     await cb.answer()
     await _grade_and_advance(cb.message.chat.id, cb.bot, answer)
+
+
+@router.callback_query(F.data.startswith("qz:"))
+async def on_quiz_answer(cb: CallbackQuery) -> None:
+    _, tid, opt = cb.data.split(":")
+    s = store.get(cb.message.chat.id)
+    if s is None or s.current is None or s.current.id != int(tid):
+        await cb.answer("Этот вопрос уже не активен.")
+        return
+    await cb.answer()
+    # убираем кнопки у отвеченного вопроса
+    try:
+        await cb.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+    await _grade_and_advance(cb.message.chat.id, cb.bot, opt)
+
+
+@router.message(Command("restart"))
+async def cmd_restart(message: Message) -> None:
+    conn = _conn()
+    ensure_user(conn, message.chat.id, "")
+    conn.execute("UPDATE users SET course_day=0 WHERE chat_id=?", (message.chat.id,))
+    conn.commit()
+    conn.close()
+    store.clear(message.chat.id)
+    await message.answer("Курс сброшен на день 1. Напишите /today, чтобы начать заново.")
 
 
 @router.message(F.text)

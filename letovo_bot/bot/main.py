@@ -16,7 +16,7 @@ from aiogram.client.default import DefaultBotProperties
 
 from .. import config
 from ..core import db
-from .handlers import router
+from .handlers import router, set_scheduler
 from .scheduler import DailyScheduler
 
 
@@ -39,6 +39,7 @@ async def main() -> None:
     dp.include_router(router)
 
     scheduler = DailyScheduler(bot)
+    set_scheduler(scheduler)        # чтобы /settings перепланировал рассылку сразу
     scheduler.start()
 
     logging.info("Бот запущен. LLM-судья: %s", "вкл" if config.ENABLE_LLM_JUDGE else "выкл")

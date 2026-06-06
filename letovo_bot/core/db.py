@@ -29,7 +29,8 @@ CREATE TABLE IF NOT EXISTS texts (
   statements_json TEXT, phrasemes_json TEXT
 );
 CREATE TABLE IF NOT EXISTS users (
-  chat_id INTEGER PRIMARY KEY, name TEXT, timezone TEXT, daily_time TEXT
+  chat_id INTEGER PRIMARY KEY, name TEXT, timezone TEXT, daily_time TEXT,
+  course_day INTEGER DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS attempts (
   id INTEGER PRIMARY KEY, chat_id INTEGER, task_id INTEGER, task_type INTEGER,
@@ -50,6 +51,10 @@ def connect(path: str | Path) -> sqlite3.Connection:
 
 def init_db(conn: sqlite3.Connection) -> None:
     conn.executescript(SCHEMA)
+    # миграция для старых БД: добавить course_day, если столбца ещё нет
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(users)").fetchall()}
+    if "course_day" not in cols:
+        conn.execute("ALTER TABLE users ADD COLUMN course_day INTEGER DEFAULT 0")
     conn.commit()
 
 

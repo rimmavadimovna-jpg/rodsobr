@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sqlite3
 from pathlib import Path
 
@@ -22,6 +23,9 @@ from .. import config
 from ..core import db
 from ..core.assembler import InvariantError, validate_task
 from ..core.db import _row_to_task
+from ..core.models import TaskType
+
+QUIZ_JSON = Path(__file__).resolve().parent / "quiz_questions.json"
 
 ROZ = "https://old-rozental.ru/"
 LOP = "https://orthographia.ru/"
@@ -684,47 +688,63 @@ def collect_task_specs(text_id: int, text2_id: int) -> list[tuple]:
     return specs
 
 
+def load_quiz_questions(path: str | Path = QUIZ_JSON) -> list[dict]:
+    """Загружает выверенные тестовые вопросы (тип QUIZ) из JSON.
+
+    JSON получают парсингом файла-источника заданий (themes 1–6). Источник
+    единиц — этот файл, не генерация на лету.
+    """
+    with open(path, encoding="utf-8") as f:
+        return json.load(f)
+
+
+def seed_quiz(conn: sqlite3.Connection, questions: list[dict]) -> list[int]:
+    """Вставляет тестовые вопросы как задания типа QUIZ. Возвращает их id."""
+    ids: list[int] = []
+    for q in questions:
+        theme = int(q["theme"])
+        payload = {
+            "theme": theme,
+            "theme_title": q.get("theme_title", ""),
+            "idx": int(q["idx"]),
+            "stem": q["stem"],
+            "options": q.get("options", []),
+        }
+        answer = {
+            "correct": q.get("correct"),
+            "answer_text": q.get("answer_text"),
+            "explanation": q.get("expl", ""),
+        }
+        topic = f"Тема {theme}. {q.get('theme_title', '')}".strip()
+        tid = db.insert_task(
+            conn, int(TaskType.QUIZ), payload, answer,
+            topic=topic, difficulty=1,
+            source="Собственный файл заданий (data/quiz_questions.json)",
+            verified=True,
+        )
+        ids.append(tid)
+    return ids
+
+
 def build(db_path: str | Path) -> None:
+    """Собирает банк из тестовых вопросов (тип QUIZ) — материал только из файла."""
     conn = db.connect(db_path)
     db.init_db(conn)
-    # чистим для идемпотентности
+    # чистим задания/тексты/слова (прогресс пользователей в users/attempts сохраняется)
     conn.executescript("DELETE FROM tasks; DELETE FROM texts; DELETE FROM words;")
     conn.commit()
 
-    seed_words(conn)
+    questions = load_quiz_questions()
+    created_ids = seed_quiz(conn, questions)
 
-    # тексты для 11/12 (два собственных текста — для ротации)
-    body, lic, st, ph = seed_text()
-    text_id = db.insert_text(conn, body, lic, st, ph)
-    body2, lic2, st2, ph2 = seed_text2()
-    text2_id = db.insert_text(conn, body2, lic2, st2, ph2)
+    # статистика по темам
+    by_theme: dict[int, int] = {}
+    for q in questions:
+        by_theme[int(q["theme"])] = by_theme.get(int(q["theme"]), 0) + 1
 
-    inserts = collect_task_specs(text_id, text2_id)
-
-    created_ids: list[int] = []
-    for (tt, payload, answer, rubric, topic, src) in inserts:
-        tid = db.insert_task(conn, tt, payload, answer, topic=topic,
-                             rubric=rubric, source=src, verified=True)
-        created_ids.append(tid)
-
-    # выверка инвариантов прямо при сборке — падаем при нарушении
-    errors = []
-    for tid in created_ids:
-        row = conn.execute("SELECT * FROM tasks WHERE id=?", (tid,)).fetchone()
-        task = _row_to_task(row)
-        try:
-            validate_task(task)
-        except InvariantError as e:
-            errors.append(str(e))
-    if errors:
-        raise InvariantError("Сборка банка прервана:\n" + "\n".join(errors))
-
-    by_type: dict[int, int] = {}
-    for (tt, *_rest) in inserts:
-        by_type[tt] = by_type.get(tt, 0) + 1
     print(f"Банк собран: {db_path}")
-    print(f"  заданий: {len(created_ids)} (типы 1–12), текстов: 2, инварианты: OK")
-    print(f"  по типам: {dict(sorted(by_type.items()))}")
+    print(f"  тестовых вопросов (QUIZ): {len(created_ids)}")
+    print(f"  по темам: {dict(sorted(by_theme.items()))}")
     conn.close()
 
 

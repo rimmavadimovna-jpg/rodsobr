@@ -12,6 +12,7 @@ check(task, user_answer, judge) -> Verdict
 """
 from __future__ import annotations
 
+import re
 from typing import Optional
 
 from . import detectors as D
@@ -394,4 +395,48 @@ _GRADERS = {
     TaskType.FOURTH_EXTRA: grade_fourth_extra,
     TaskType.TEXT_STATEMENTS: grade_text_statements,
     TaskType.PHRASEME: grade_phraseme,
+    TaskType.QUIZ: None,  # назначается ниже (определён после _GRADERS)
 }
+
+
+# --------------------------------------------------------------------------- #
+# QUIZ — тест с выбором варианта (1 из N) или открытый ответ
+# --------------------------------------------------------------------------- #
+def grade_quiz(task: Task, ans: str, judge=None) -> Verdict:
+    """Проверка тестового вопроса.
+
+    MCQ: answer={'correct': N (1-based)} — сверяем выбранный номер.
+    Открытый: answer={'answer_text': '...'} — нормализованное сравнение текста.
+    Объяснение из банка всегда показывается как обратная связь.
+    """
+    a = task.answer
+    p = task.payload
+    expl = a.get("explanation") or a.get("expl") or ""
+    options = p.get("options") or []
+
+    if a.get("correct"):  # MCQ
+        correct = int(a["correct"])
+        chosen = None
+        m = re.search(r"\d+", ans or "")
+        if m:
+            chosen = int(m.group())
+        ok = chosen == correct
+        correct_text = options[correct - 1] if 0 < correct <= len(options) else ""
+        ref = f"{correct}) {correct_text}".strip()
+        if expl:
+            ref += f"\n{expl}"
+        crit = [CriterionResult(
+            name="Выбор варианта", passed=ok, source="reference",
+            detail=("верно" if ok else f"правильный ответ: {correct}) {correct_text}"))]
+        return _mk(1.0 if ok else 0.0, crit, ref=ref, rule=task.source)
+
+    # Открытый ответ
+    expected = a.get("answer_text", "")
+    ok = D.norm_text(ans) == D.norm_text(expected)
+    ref = expected + (f"\n{expl}" if expl else "")
+    crit = [CriterionResult(name="Ответ", passed=ok, source="reference",
+                            detail=("верно" if ok else f"правильный ответ: {expected}"))]
+    return _mk(1.0 if ok else 0.0, crit, ref=ref, rule=task.source)
+
+
+_GRADERS[TaskType.QUIZ] = grade_quiz

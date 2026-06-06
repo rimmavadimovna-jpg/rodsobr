@@ -218,3 +218,68 @@ def build_daily_set(conn: sqlite3.Connection, chat_id: int,
             if len(selected) >= n_min:
                 break
     return selected[:n_max]
+
+
+# --------------------------------------------------------------------------- #
+# Курс из 15 дней по тестовым заданиям (QUIZ)
+#
+# План дня: по 1 вопросу из тем 1, 2, 3 и по 2 вопроса из тем 4, 5, 6 = 9 шт.
+# Темы 1–3 идут по порядку (день d → вопрос d). Темы 4–6 перемешиваются один раз
+# детерминированно (фикс. seed), затем берутся по 2 в день. Всего 15 дней.
+# --------------------------------------------------------------------------- #
+import random as _random
+
+COURSE_DAYS = 15
+SEQ_THEMES = (1, 2, 3)        # по 1 вопросу в день, по порядку
+RANDOM_THEMES = (4, 5, 6)     # по 2 вопроса в день, перемешанные
+_SHUFFLE_SEED = 20240601
+
+
+def _quiz_tasks_by_theme(conn: sqlite3.Connection) -> dict[int, list[Task]]:
+    """Все QUIZ-задания, сгруппированные по теме и упорядоченные по idx."""
+    by_theme: dict[int, list[Task]] = {}
+    for t in db.all_tasks(conn, verified_only=True):
+        if int(t.task_type) != int(TaskType.QUIZ):
+            continue
+        theme = int(t.payload.get("theme", 0))
+        by_theme.setdefault(theme, []).append(t)
+    for theme, lst in by_theme.items():
+        lst.sort(key=lambda x: int(x.payload.get("idx", 0)))
+    return by_theme
+
+
+def course_day_set(conn: sqlite3.Connection, day: int) -> list[Task]:
+    """Возвращает 9 заданий для дня `day` (0-based, 0..14). Пустой список вне курса."""
+    if day < 0 or day >= COURSE_DAYS:
+        return []
+    by_theme = _quiz_tasks_by_theme(conn)
+    selected: list[Task] = []
+    # темы 1–3: по одному по порядку
+    for th in SEQ_THEMES:
+        lst = by_theme.get(th, [])
+        if day < len(lst):
+            selected.append(lst[day])
+    # темы 4–6: перемешать детерминированно, взять по 2
+    for th in RANDOM_THEMES:
+        lst = by_theme.get(th, [])[:]
+        _random.Random(_SHUFFLE_SEED + th).shuffle(lst)
+        for pos in (2 * day, 2 * day + 1):
+            if pos < len(lst):
+                selected.append(lst[pos])
+    return selected
+
+
+def get_course_day(conn: sqlite3.Connection, chat_id: int) -> int:
+    row = conn.execute("SELECT course_day FROM users WHERE chat_id=?", (chat_id,)).fetchone()
+    return int(row["course_day"]) if row and row["course_day"] is not None else 0
+
+
+def advance_course_day(conn: sqlite3.Connection, chat_id: int) -> None:
+    conn.execute("UPDATE users SET course_day = COALESCE(course_day, 0) + 1 WHERE chat_id=?",
+                 (chat_id,))
+    conn.commit()
+
+
+def build_course_today(conn: sqlite3.Connection, chat_id: int) -> list[Task]:
+    """Набор текущего дня курса для пользователя (по его course_day)."""
+    return course_day_set(conn, get_course_day(conn, chat_id))

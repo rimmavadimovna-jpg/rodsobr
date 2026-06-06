@@ -1,0 +1,18 @@
+[Unit]
+Description=Letovo Telegram bot (quiz course)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Папка с проектом (где лежит каталог letovo_bot). Поменяйте, если клонировали в другое место.
+WorkingDirectory=/home/ubuntu/rodsobr
+# Токен и прочие переменные берутся из файла окружения (создаётся при установке).
+EnvironmentFile=/etc/letovo-bot.env
+ExecStart=/home/ubuntu/rodsobr/.venv/bin/python -m letovo_bot.bot.main
+Restart=always
+RestartSec=5
+User=ubuntu
+
+[Install]
+WantedBy=multi-user.target

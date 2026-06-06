@@ -24,8 +24,8 @@ ANTHROPIC_MODEL_VERIFY = os.getenv("ANTHROPIC_MODEL_VERIFY", "claude-opus-4-8")
 ANTHROPIC_MODEL_JUDGE = os.getenv("ANTHROPIC_MODEL_JUDGE", "claude-haiku-4-5-20251001")
 
 # --- Поведение бота ---
-DEFAULT_TIMEZONE = os.getenv("LETOVO_DEFAULT_TZ", "Europe/Podgorica")
-DEFAULT_DAILY_TIME = os.getenv("LETOVO_DEFAULT_TIME", "18:00")
+DEFAULT_TIMEZONE = os.getenv("LETOVO_DEFAULT_TZ", "Europe/Moscow")
+DEFAULT_DAILY_TIME = os.getenv("LETOVO_DEFAULT_TIME", "10:00")
 
 # Сколько заданий в дневном наборе (15–20 минут).
 DAILY_TASK_MIN = int(os.getenv("LETOVO_DAILY_MIN", "6"))
