@@ -34,6 +34,21 @@ def _conn() -> sqlite3.Connection:
     return db.connect(config.BANK_PATH, read_only=True)
 
 
+def _remember(chat_id: int, from_user) -> None:
+    """Создать/обновить профиль ученика, запомнив имя и Telegram-ник.
+
+    Ник нужен, чтобы в уведомлениях администратору показывать @username.
+    """
+    if from_user is None:
+        userstore.ensure_user(chat_id)
+        return
+    userstore.remember_user(
+        chat_id,
+        name=getattr(from_user, "full_name", "") or "",
+        username=getattr(from_user, "username", "") or "",
+    )
+
+
 # --------------------------------------------------------------------------- #
 # Рендеринг
 # --------------------------------------------------------------------------- #
@@ -139,8 +154,7 @@ def render_verdict(v: Verdict) -> str:
 # --------------------------------------------------------------------------- #
 @router.message(CommandStart())
 async def cmd_start(message: Message) -> None:
-    userstore.ensure_user(message.chat.id,
-                          message.from_user.full_name if message.from_user else "")
+    _remember(message.chat.id, message.from_user)
     await message.answer(
         "Привет! Я тренажёр по русскому языку — курс из 15 дней.\n"
         f"Каждый день в {config.DEFAULT_DAILY_TIME} ({config.DEFAULT_TIMEZONE}) я присылаю "
@@ -153,6 +167,7 @@ async def cmd_start(message: Message) -> None:
 
 @router.message(Command("today"))
 async def cmd_today(message: Message) -> None:
+    _remember(message.chat.id, message.from_user)
     await send_daily(message.chat.id, message.bot)
 
 
@@ -247,12 +262,51 @@ async def _finish_day(chat_id: int, bot) -> None:
                 else "Возвращайтесь завтра за следующим набором — или сразу /today.")
         await bot.send_message(
             chat_id, f"🏁 Итог дня: {avg:.0%} верных. {tail}\n/stats — прогресс по темам.")
+        await _notify_admin(bot, chat_id, s, avg)
     store.clear(chat_id)
+
+
+async def _notify_admin(bot, chat_id: int, s, avg: float) -> None:
+    """Уведомить администратора, если набор завершил кто-то другой (не админ).
+
+    Шлёт ник ученика, итог дня и разбивку ошибок по темам за этот набор.
+    """
+    admin = config.ADMIN_CHAT_ID
+    if not admin or chat_id == admin:
+        return
+    profile = userstore.get_user(chat_id) or {}
+    uname = profile.get("username")
+    who = f"@{uname}" if uname else (profile.get("name") or f"id {chat_id}")
+
+    counts: dict[str, int] = {}
+    wrong: dict[str, int] = {}
+    for task, score in zip(s.tasks, s.day_scores):
+        counts[task.topic] = counts.get(task.topic, 0) + 1
+        if score < 1.0:
+            wrong[task.topic] = wrong.get(task.topic, 0) + 1
+    total = len(s.day_scores)
+    correct = sum(1 for sc in s.day_scores if sc >= 1.0)
+
+    if wrong:
+        lines = "\n".join(f"• {_esc(t)} — ошибок {w} из {counts[t]}"
+                          for t, w in wrong.items())
+        mistakes_block = "Ошибки по темам:\n" + lines
+    else:
+        mistakes_block = "Ошибок нет 🎉"
+
+    text = (f"🧑‍🎓 <b>{_esc(who)}</b> завершил(а) дневной набор\n"
+            f"Итог дня: {avg:.0%} ({correct} из {total} верно)\n\n"
+            f"{mistakes_block}")
+    try:
+        await bot.send_message(admin, text, parse_mode="HTML")
+    except Exception as e:  # уведомление не должно ломать поток ученика
+        print(f"[notify_admin] не удалось отправить администратору {admin}: {e}")
 
 
 @router.callback_query(F.data.startswith("tog:"))
 async def on_toggle(cb: CallbackQuery) -> None:
     _, tid, n = cb.data.split(":")
+    _remember(cb.message.chat.id, cb.from_user)
     s = store.get(cb.message.chat.id)
     if s is None or s.current is None or s.current.id != int(tid):
         await cb.answer("Это задание уже не активно.")
@@ -266,6 +320,7 @@ async def on_toggle(cb: CallbackQuery) -> None:
 @router.callback_query(F.data.startswith("done:"))
 async def on_done(cb: CallbackQuery) -> None:
     _, tid = cb.data.split(":")
+    _remember(cb.message.chat.id, cb.from_user)
     s = store.get(cb.message.chat.id)
     if s is None or s.current is None or s.current.id != int(tid):
         await cb.answer("Это задание уже не активно.")
@@ -280,6 +335,7 @@ async def on_done(cb: CallbackQuery) -> None:
 @router.callback_query(F.data.startswith("qz:"))
 async def on_quiz_answer(cb: CallbackQuery) -> None:
     _, tid, opt = cb.data.split(":")
+    _remember(cb.message.chat.id, cb.from_user)
     s = store.get(cb.message.chat.id)
     if s is None or s.current is None or s.current.id != int(tid):
         await cb.answer("Этот вопрос уже не активен.")
@@ -303,6 +359,7 @@ async def cmd_restart(message: Message) -> None:
 
 @router.message(F.text)
 async def on_text_answer(message: Message) -> None:
+    _remember(message.chat.id, message.from_user)
     s = store.get(message.chat.id)
     if s is None or s.finished:
         return  # вне сессии — игнор (команды обрабатываются выше)

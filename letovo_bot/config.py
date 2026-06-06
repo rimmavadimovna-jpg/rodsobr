@@ -39,6 +39,12 @@ ANTHROPIC_MODEL_JUDGE = os.getenv("ANTHROPIC_MODEL_JUDGE", "claude-haiku-4-5-202
 DEFAULT_TIMEZONE = os.getenv("LETOVO_DEFAULT_TZ", "Europe/Moscow")
 DEFAULT_DAILY_TIME = os.getenv("LETOVO_DEFAULT_TIME", "10:00")
 
+# Чат администратора/учителя: туда приходят уведомления, когда дневной набор
+# завершает кто-то ДРУГОЙ (не сам админ) — с ником ученика, итогом и ошибками.
+# По умолчанию — владелец бота; можно переопределить переменной окружения.
+# 0 → уведомления выключены.
+ADMIN_CHAT_ID = int(os.getenv("LETOVO_ADMIN_CHAT_ID", "262004044") or 0)
+
 # Сколько заданий в дневном наборе (15–20 минут).
 DAILY_TASK_MIN = int(os.getenv("LETOVO_DAILY_MIN", "6"))
 DAILY_TASK_MAX = int(os.getenv("LETOVO_DAILY_MAX", "8"))

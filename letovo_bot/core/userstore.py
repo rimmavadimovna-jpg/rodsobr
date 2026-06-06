@@ -143,6 +143,25 @@ def get_user(chat_id: int) -> Optional[dict]:
     return kv_get_json(_user_key(chat_id))
 
 
+def remember_user(chat_id: int, name: str = "", username: str = "") -> None:
+    """Создать пользователя при необходимости и обновить имя/ник из Telegram.
+
+    Ник (username) нужен для уведомлений администратору о прохождениях.
+    Пустые значения не затирают уже сохранённые.
+    """
+    ensure_user(chat_id, name)
+    profile = get_user(chat_id) or {}
+    changed = False
+    if name and profile.get("name") != name:
+        profile["name"] = name
+        changed = True
+    if username and profile.get("username") != username:
+        profile["username"] = username
+        changed = True
+    if changed:
+        kv_set_json(_user_key(chat_id), profile)
+
+
 def set_user_field(chat_id: int, field: str, value: Any) -> None:
     profile = get_user(chat_id) or {}
     profile[field] = value
